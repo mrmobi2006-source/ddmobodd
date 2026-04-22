@@ -35,7 +35,7 @@ from Crypto.Util.Padding import unpad
 #  ⚙️  الإعدادات — عدّل هذا القسم فقط
 # ─────────────────────────────────────────────
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"          # <── ضع توكن البوت هنا
+BOT_TOKEN = "8690128803:AAHyf-UhR-lf2HS02hG02zXyEa2_65VLe1k"          # <── ضع توكن البوت هنا
 
 # مفاتيح AES المعروفة — تُجرَّب بالترتيب حتى ينجح فك التشفير
 AES_KEYS: list[bytes] = [
