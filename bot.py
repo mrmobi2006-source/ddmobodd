@@ -3,75 +3,64 @@ import base64
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
-# التوكن الخاص بك
 TOKEN = "8690128803:AAHyf-UhR-lf2HS02hG02zXyEa2_65VLe1k"
 bot = telebot.TeleBot(TOKEN)
 
 def get_aes_key():
-    """خوارزمية استخراج المفتاح السري التي قمنا بتحليلها"""
+    # النص المرجعي من ملف الجافا
     encoded_str = "ZXCHn3veSKESmIQGY5dTv+Y5At4diIt6mZtYwgFH5dU="
     decoded_bytes = base64.b64decode(encoded_str)
-    # أخذ 16 بايت من الموقع 4
+    # التطبيق يأخذ 16 بايت تبدأ من الموقع 4 (index 4 to 20)
     key_fragment = bytearray(decoded_bytes[4:20])
-    # عملية XOR مع الرقم 68
-    final_key = bytes([b ^ 68 for b in key_fragment])
-    return final_key
+    # عملية الـ XOR مع الرقم 68 (0x44) كما في الكود
+    return bytes([b ^ 68 for b in key_fragment])
 
-# استدعاء المفتاح مرة واحدة عند تشغيل البوت
 AES_KEY = get_aes_key()
-
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    welcome_text = (
-        "مرحباً بك يا بطل في بوت فك التشفير! 🚀\n\n"
-        "قم بإرسال ملف الإعدادات المشفر (مثلاً ملف .dark أو أي ملف يستعمل نفس الخوارزمية) "
-        "وسأقوم باستخراج سيرفرات VLESS والبيانات منه فوراً."
-    )
-    bot.reply_to(message, welcome_text)
 
 @bot.message_handler(content_types=['document'])
 def handle_docs(message):
-    msg = bot.reply_to(message, "⏳ جاري تحليل وفك تشفير الملف...")
+    msg = bot.reply_to(message, "🔍 محاولة فك التشفير بطرق متعددة...")
     try:
-        # تحميل الملف من التليجرام
         file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
+        data = bot.download_file(file_info.file_path)
 
-        # بحسب تحليلنا لكود الجافا (السطر 188)، أول 16 بايت هي الـ IV
-        iv = downloaded_file[:16]
-        # باقي الملف هو النص المشفر
-        ciphertext = downloaded_file[16:]
-
-        # عملية فك التشفير AES/CBC
-        cipher = AES.new(AES_KEY, AES.MODE_CBC, iv)
-        decrypted_padded = cipher.decrypt(ciphertext)
+        # محاولة 1: افتراض أن أول 16 بايت هي IV
+        iv = data[:16]
+        ciphertext = data[16:]
         
-        # إزالة الحشو (Padding) وتحويل الناتج إلى نص
-        decrypted_data = unpad(decrypted_padded, AES.block_size).decode('utf-8', errors='ignore')
+        # إذا فشل التشفير العادي، سنجرب IV صفري (شائع في بعض تطبيقات التشفير)
+        possible_ivs = [iv, bytes([0]*16)]
+        
+        decrypted_text = None
+        
+        for trial_iv in possible_ivs:
+            try:
+                cipher = AES.new(AES_KEY, AES.MODE_CBC, trial_iv)
+                raw_decrypted = cipher.decrypt(ciphertext if trial_iv == iv else data)
+                
+                # محاولة إزالة الحشو PKCS7
+                try:
+                    decrypted_text = unpad(raw_decrypted, AES.block_size).decode('utf-8', errors='ignore')
+                    break 
+                except:
+                    # إذا فشل الحشو، ربما البيانات لا تحتاج إزالة حشو
+                    decrypted_text = raw_decrypted.decode('utf-8', errors='ignore')
+                    if "vless" in decrypted_text.lower() or "vmess" in decrypted_text.lower():
+                        break
+            except:
+                continue
 
-        # التحقق من حجم النص (تليجرام لا يسمح برسائل أطول من 4096 حرف)
-        if len(decrypted_data) > 4000:
-            with open("decrypted_servers.txt", "w", encoding="utf-8") as f:
-                f.write(decrypted_data)
-            with open("decrypted_servers.txt", "rb") as f:
-                bot.send_document(message.chat.id, f, caption="✅ تم فك التشفير! (تم إرساله كملف لأن المحتوى طويل جداً)")
-            bot.delete_message(message.chat.id, msg.message_id)
-        else:
-            bot.edit_message_text(f"✅ **تم فك التشفير بنجاح:**\n\n`{decrypted_data}`", 
+        if decrypted_text and len(decrypted_text.strip()) > 5:
+            bot.edit_message_text(f"✅ **تم استخراج البيانات:**\n\n`{decrypted_text[:1000]}`", 
                                   chat_id=message.chat.id, 
                                   message_id=msg.message_id, 
                                   parse_mode='Markdown')
+        else:
+            raise ValueError("لم نتمكن من العثور على نص مفهوم")
 
-    except ValueError:
-        bot.edit_message_text("❌ خطأ: لم أتمكن من إزالة الحشو (Padding). قد يكون الملف غير مدعوم أو المفتاح غير مطابق لهذه النسخة.", 
-                              chat_id=message.chat.id, 
-                              message_id=msg.message_id)
     except Exception as e:
-        bot.edit_message_text(f"❌ حدث خطأ غير متوقع:\n`{str(e)}`", 
+        bot.edit_message_text(f"❌ لا يزال هناك تعارض في المفتاح أو بنية الملف.\nتأكد أن الملف هو الملف الناتج عن عملية التشفير في السطر 188 (ملف .tmp أو .dex).", 
                               chat_id=message.chat.id, 
-                              message_id=msg.message_id, 
-                              parse_mode='Markdown')
+                               message_id=msg.message_id)
 
-print("Bot is running...")
-# تشغيل البوت بشكل مستمر
 bot.infinity_polling()
