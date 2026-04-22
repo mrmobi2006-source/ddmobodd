@@ -35,16 +35,16 @@ from Crypto.Util.Padding import unpad
 #  ⚙️  الإعدادات — عدّل هذا القسم فقط
 # ─────────────────────────────────────────────
 
-BOT_TOKEN = "8690128803:AAHyf-UhR-lf2HS02hG02zXyEa2_65VLe1k"          # <── ضع توكن البوت هنا
+BOT_TOKEN = "8690128803:AAHyf-UhR-lf2HS02hG02zXyEa2_65VLe1k"          # <── ضع توكن البوت هنا (لا تشاركه مع أحد)
 
-# مفاتيح AES المعروفة — تُجرَّب بالترتيب حتى ينجح فك التشفير
-AES_KEYS: list[bytes] = [
-    b"DarkTunnel12345!",   # 16 bytes — AES-128
-    b"DarkTunnel1234!@",
-    b"darktunnel123456",
-    b"DarkTunnelKey128",
-    # أضف مفاتيح أخرى هنا إن توفرت
-]
+# ─── اشتقاق المفتاح الحقيقي ───
+# النص المرجعي → Base64 decode → slice [4:20] → XOR كل بايت مع 0x44
+_KEY_REF_B64 = "ZXCHn3veSKESmIQGY5dTv+Y5At4diIt6mZtYwgFH5dU="
+_key_ref_bytes = base64.b64decode(_KEY_REF_B64)
+DERIVED_KEY: bytes = bytes(b ^ 0x44 for b in _key_ref_bytes[4:20])
+
+# قائمة المفاتيح للتجربة (المشتق أولاً)
+AES_KEYS: list[bytes] = [DERIVED_KEY]
 
 # ─────────────────────────────────────────────
 #  📋  تهيئة السجل
