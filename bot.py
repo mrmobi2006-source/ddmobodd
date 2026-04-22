@@ -1,184 +1,78 @@
-#!/usr/bin/env python3
-"""
-=====================================
-  DarkTunnel Decryptor — Telegram Bot
-=====================================
-pip install python-telegram-bot pycryptodome
-BOT_TOKEN=xxxx python dark_decryptor_bot.py
-"""
-
-import os, re, json, base64, logging, tempfile, traceback
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+import base64
+import json
+import io
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+# --- الإعدادات التقنية المستخرجة ---
+TOKEN = "8690128803:AAHyf-UhR-lf2HS02hG02zXyEa2_65VLe1k"
 
-_KEY_REF_B64 = "ZXCHn3veSKESmIQGY5dTv+Y5At4diIt6mZtYwgFH5dU="
-_key_ref_bytes = base64.b64decode(_KEY_REF_B64)
-DERIVED_KEY: bytes = bytes(b ^ 0x44 for b in _key_ref_bytes[4:20])
+def derive_aes_key():
+    """اشتقاق المفتاح باستخدام خوارزمية XOR 68 التي استخرجناها من الجافا"""
+    reference = "ZXCHn3veSKESmIQGY5dTv+Y5At4diIt6mZtYwgFH5dU="
+    decoded = base64.b64decode(reference)
+    # استخراج 16 بايت بدءاً من Index 4 وإجراء XOR مع 68
+    key_bytes = bytearray(decoded[4:20])
+    return bytes([b ^ 68 for b in key_bytes])
 
-logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
+AES_KEY = derive_aes_key()
 
-
-def fix_b64(s: str) -> str:
-    s = s.replace("-", "+").replace("_", "/")
-    pad = len(s) % 4
-    if pad: s += "=" * (4 - pad)
-    return s
-
-
-def try_aes(ct: bytes, iv: bytes, key: bytes):
+def decrypt_payload(encrypted_data_b64):
+    """فك تشفير AES-CBC للبيانات الموصدة"""
     try:
-        return unpad(AES.new(key, AES.MODE_CBC, iv=iv).decrypt(ct), AES.block_size)
-    except Exception:
-        return None
-
-
-def decrypt_payload(b64_payload: str) -> tuple[str, str]:
-    raw = base64.b64decode(fix_b64(b64_payload))
-    logger.info(f"decrypt | raw_len={len(raw)} | first16={raw[:16].hex()} | key={DERIVED_KEY.hex()}")
-
-    zero_iv = b"\x00" * 16
-    combos = []
-    if len(raw) > 16:
-        combos += [
-            ("IV=first16 | CT=raw[16:]", raw[:16], raw[16:]),
-            ("IV=zero    | CT=raw[16:]", zero_iv,  raw[16:]),
-        ]
-    combos.append(("IV=zero | CT=raw(full)", zero_iv, raw))
-
-    for label, iv, ct in combos:
-        result = try_aes(ct, iv, DERIVED_KEY)
-        if result is not None:
-            logger.info(f"SUCCESS: {label}")
-            return result.decode("utf-8", errors="replace"), label
-
-    diag = (
-        f"حجم البيانات الخام : {len(raw)} بايت\n"
-        f"أول 16 بايت (IV?)  : {raw[:16].hex()}\n"
-        f"المفتاح المشتق     : {DERIVED_KEY.hex()}\n"
-        f"المجموعات المُجرَّبة: {len(combos)} — جميعها فشلت"
-    )
-    raise ValueError(diag)
-
-
-def parse_dark(content: str) -> dict:
-    content = content.strip()
-
-    m = re.match(r"(?i)darktunnel://(.+)", content)
-    if m:
-        inner = json.loads(base64.b64decode(fix_b64(m.group(1))).decode("utf-8"))
-        enc = inner.get("encryptedLockedConfig", "")
-        if enc:
-            plain, method = decrypt_payload(enc)
-        else:
-            plain, method = json.dumps(inner, ensure_ascii=False, indent=2), "لا يوجد حقل مشفر"
-        return {"source": "DarkTunnel URI", "type": inner.get("type","N/A"),
-                "name": inner.get("name","N/A"), "method": method, "decrypted_config": plain}
-
-    try:
-        obj = json.loads(content)
-        enc = obj.get("encryptedLockedConfig", "")
-        if enc:
-            plain, method = decrypt_payload(enc)
-        else:
-            plain, method = json.dumps(obj, ensure_ascii=False, indent=2), "لا حقل مشفر"
-        return {"source": "JSON مباشر", "type": obj.get("type","N/A"),
-                "name": obj.get("name","N/A"), "method": method, "decrypted_config": plain}
-    except json.JSONDecodeError:
-        pass
-
-    plain, method = decrypt_payload(content)
-    return {"source": "Base64 خام", "type": "N/A", "name": "N/A",
-            "method": method, "decrypted_config": plain}
-
-
-def build_output(info: dict) -> str:
-    sep = "═" * 52
-    return (
-        f"{sep}\n  DarkTunnel Decryptor — النتيجة\n{sep}\n\n"
-        f"المصدر      : {info['source']}\n"
-        f"النوع (type): {info['type']}\n"
-        f"الاسم (name): {info['name']}\n"
-        f"الطريقة     : {info['method']}\n\n"
-        f"{sep}\n  الإعدادات بعد فك التشفير\n{sep}\n\n"
-        f"{info['decrypted_config']}\n\n{sep}\n"
-    )
-
-
-async def _process(update: Update, content: str, out_filename: str):
-    out_tmp = None
-    try:
-        info = parse_dark(content)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w", encoding="utf-8") as f:
-            f.write(build_output(info))
-            out_tmp = f.name
-        await update.message.reply_document(
-            document=open(out_tmp, "rb"), filename=out_filename,
-            caption=f"✅ *تم!* النوع: `{info['type']}` | الاسم: `{info['name']}`",
-            parse_mode="Markdown",
-        )
-    except ValueError as e:
-        await update.message.reply_text(
-            f"❌ *فشل فك التشفير*\n\n```\n{e}\n```\n\n"
-            "💡 تحقق من صحة منطق اشتقاق المفتاح في `_KEY_REF_B64`.",
-            parse_mode="Markdown",
-        )
+        raw_data = base64.b64decode(encrypted_data_b64)
+        iv = raw_data[:16]  # أول 16 بايت هي الـ IV
+        ciphertext = raw_data[16:]
+        
+        cipher = AES.new(AES_KEY, AES.MODE_CBC, iv)
+        decrypted = unpad(cipher.decrypt(ciphertext), AES.block_size)
+        return decrypted.decode('utf-8', errors='ignore')
     except Exception as e:
-        logger.error(traceback.format_exc())
-        await update.message.reply_text(f"❌ خطأ: `{e}`", parse_mode="Markdown")
-    finally:
-        if out_tmp:
-            try: os.unlink(out_tmp)
-            except: pass
+        return f"خطأ في فك التشفير: {str(e)}"
 
+async def process_config(content):
+    """تحليل نص الإعدادات وفكه سواء كان رابطاً أو ملف JSON"""
+    try:
+        # إذا كان رابطاً، نزيل البادئة ونفك الـ Base64 الخارجي
+        if content.startswith("darktunnel://"):
+            content = content.replace("darktunnel://", "")
+        
+        data = json.loads(base64.b64decode(content))
+        
+        # التحقق من وجود محتوى موصد (Locked)
+        if "encryptedLockedConfig" in data:
+            inner_decrypted = decrypt_payload(data["encryptedLockedConfig"])
+            return f"✅ **تم كسر التشفير بنجاح!**\n\n**الإعدادات الداخلية:**\n`{inner_decrypted}`"
+        else:
+            return f"✅ **إعدادات مفتوحة:**\n`{json.dumps(data, indent=2, ensure_ascii=False)}`"
+    except:
+        return "❌ فشل تحليل البيانات. تأكد أن الرابط أو الملف صحيح."
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 *DarkTunnel Decryptor Bot*\n\n"
-        "📎 أرسل ملف `.dark` وسأعيد لك ملف `.txt` يحتوي الإعدادات المفكوكة.\n"
-        "يُقبل أيضاً: رابط `darktunnel://...` أو JSON مباشر.", parse_mode="Markdown")
+# --- إدارة البوت ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("أرسل لي رابط Darktunnel أو ملف .dark وسأقوم بتفكيكه لك فوراً.")
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result = await process_config(update.message.text)
+    await update.message.reply_text(result, parse_mode='Markdown')
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    fname = doc.file_name or "file.dark"
-    await update.message.reply_text("⏳ جاري فك التشفير...")
-    tmp = None
-    try:
-        tg_file = await doc.get_file()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".dark") as t:
-            await tg_file.download_to_drive(t.name)
-            tmp = t.name
-        with open(tmp, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read().strip()
-        await _process(update, content, fname.rsplit(".", 1)[0] + "_decrypted.txt")
-    finally:
-        if tmp:
-            try: os.unlink(tmp)
-            except: pass
+    file = await context.bot.get_file(update.message.document.file_id)
+    buffer = io.BytesIO()
+    await file.download_to_memory(buffer)
+    content = buffer.getvalue().decode('utf-8')
+    
+    result = await process_config(content)
+    await update.message.reply_text(result, parse_mode='Markdown')
 
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    content = update.message.text.strip()
-    if content.startswith("/"): return
-    await update.message.reply_text("⏳ جاري فك التشفير...")
-    await _process(update, content, "decrypted_config.txt")
-
-
-def main():
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        raise RuntimeError("عيّن BOT_TOKEN أولاً:\n  BOT_TOKEN=xxxx python dark_decryptor_bot.py")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
+if __name__ == '__main__':
+    app = ApplicationBuilder().token(TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    logger.info("🤖 البوت يعمل — Ctrl+C للإيقاف")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    main()
+    
+    print("البوت يعمل الآن... في انتظار الملفات.")
+    app.run_polling()
