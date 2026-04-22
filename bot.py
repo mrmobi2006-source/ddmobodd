@@ -1,59 +1,42 @@
 import base64
 import json
-import logging
 from Crypto.Cipher import AES
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# إعداد السجلات لمراقبة البوت من لوحة تحكم ريلواي
-logging.basicConfig(level=logging.INFO)
+def universal_decrypt(payload):
+    # قائمة بالمفاتيح المحتملة (المستخرجة من تحليل تطبيقات مشابهة)
+    possible_keys = [
+        # المفتاح الذي استخرجناه (ربما يحتاج تعديل)
+        bytes([b ^ 68 for b in base64.b64decode("ZXCHn3veSKESmIQGY5dTv+Y5At4diIt6mZtYwgFH5dU=")[4:20]]),
+        # مفاتيح افتراضية يستخدمها مطورو Go-V2Ray
+        b"1234567890123456", 
+        b"darktunnel_key_v",
+        b"v2ray_secret_key"
+    ]
 
-TOKEN = "8690128803:AAHyf-UhR-lf2HS02hG02zXyEa2_65VLe1k"
-
-def fix_padding(data):
-    missing_padding = len(data) % 4
-    if missing_padding:
-        data += '=' * (4 - missing_padding)
-    return data
-
-def decrypt_logic(link):
+    payload = payload.replace('-', '+').replace('_', '/')
     try:
-        raw_b64 = link.replace("darktunnel://", "").strip()
-        outer_data = json.loads(base64.b64decode(fix_padding(raw_b64)))
-        encrypted_config = outer_data.get("encryptedLockedConfig", "")
+        raw_data = base64.b64decode(payload + '=' * (-len(payload) % 4))
+        iv = raw_data[:16]
+        ciphertext = raw_data[16:]
         
-        # المفتاح المستخرج (XOR 68)
-        ref = "ZXCHn3veSKESmIQGY5dTv+Y5At4diIt6mZtYwgFH5dU="
-        key_raw = base64.b64decode(ref)
-        aes_key = bytes([b ^ 68 for b in key_raw[4:20]])
+        # قص الزوائد لتناسب AES
+        ciphertext = ciphertext[:(len(ciphertext) // 16) * 16]
 
-        encrypted_config = encrypted_config.replace('-', '+').replace('_', '/')
-        full_bytes = base64.b64decode(fix_padding(encrypted_config))
-        
-        iv = full_bytes[:16]
-        ciphertext = full_bytes[16:]
-        
-        # معالجة طول البيانات (Trimming)
-        remainder = len(ciphertext) % 16
-        if remainder != 0:
-            ciphertext = ciphertext[:-remainder]
-
-        cipher = AES.new(aes_key, AES.MODE_CBC, iv)
-        decrypted = cipher.decrypt(ciphertext)
-        
-        # تنظيف يدوي للبايتات الزائدة
-        result = decrypted.strip(b'\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f')
-        return result.decode('utf-8', errors='ignore')
+        for key in possible_keys:
+            try:
+                cipher = AES.new(key, AES.MODE_CBC, iv)
+                dec = cipher.decrypt(ciphertext)
+                # إذا وجدنا أي كلمة تدل على V2Ray مثل "vless" أو "host"
+                if b"vless" in dec.lower() or b"host" in dec.lower() or b"uuid" in dec.lower():
+                    return dec.decode('utf-8', errors='ignore').strip()
+            except:
+                continue
+        return "❌ لم ينجح أي مفتاح محتمل."
     except Exception as e:
-        return f"❌ خطأ: {str(e)}"
+        return f"❌ خطأ في البنية: {str(e)}"
 
-async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if "darktunnel://" in text:
-        res = decrypt_logic(text)
-        await update.message.reply_text(f"✅ تم الفك:\n\n`{res}`", parse_mode='Markdown')
-
-if __name__ == '__main__':
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_msg))
-    app.run_polling()
+# انسخ الرابط الحقيقي الذي نجح مع البوتات الأخرى وضعه هنا للتجربة
+link = "ضع_الرابط_هنا"
+if "darktunnel://" in link:
+    inner_b64 = json.loads(base64.b64decode(link.split("://")[1])).get("encryptedLockedConfig")
+    print(universal_decrypt(inner_b64))
